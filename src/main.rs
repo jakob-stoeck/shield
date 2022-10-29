@@ -1,6 +1,6 @@
 use std::env;
-use std::process::{self, Stdio, Command};
-use std::io::Write;
+use std::io::{self, Write};
+use std::process::{self, Command, Stdio};
 
 fn main() {
     // build config
@@ -12,19 +12,16 @@ fn main() {
         eprintln!("Problem parsing arguments: {err}");
         process::exit(1);
     });
-    run(config);
-}
-
-fn run(config: Config) {
-    println!("Signing into 1Password");
-    if let Err(e) = OnePassword::new() {
-        eprintln!("Application error: {e}");
+    if let Err(e) = run(config) {
+        eprintln!("{e}");
         process::exit(1);
     }
-    println!("Done signing into 1Password.");
-    println!("{:?}", config);
+}
 
-    let pass = OnePassword::read(config.pass_path);
+fn run(config: Config) -> io::Result<()> {
+    println!("Signing into 1Password");
+    OnePassword::new()?;
+    let pass = OnePassword::read(config.pass_path)?;
 
     println!("Connecting with AnyConnect …",);
     let vpn = AnyConnect {
@@ -32,8 +29,10 @@ fn run(config: Config) {
         group: config.group,
         user: config.user,
     };
+    let out = vpn.connect(pass)?;
+    println!("Connected: {out}");
 
-    vpn.connect(pass);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -58,18 +57,18 @@ impl Config {
 
 struct OnePassword {}
 impl OnePassword {
-    fn new() -> Result<(), &'static str> {
-        let output = Command::new("op").arg("signin").output().unwrap();
-
-        if !output.status.success() {
-            return Err("1Password biometric signin failed. To enable biometric unlock, navigate to  Developer Settings in the 1Password app and select \"Biometric Unlock for 1Password CLI\".");
+    fn new() -> io::Result<()> {
+        let status = Command::new("op").arg("signin").status().expect("failed to execute command 'op'");
+        if !status.success() {
+            panic!("1Password biometric signin failed. To enable biometric unlock, navigate to  Developer Settings in the 1Password app and select \"Biometric Unlock for 1Password CLI\".");
         }
         Ok(())
     }
 
-    fn read(path: String) -> String {
-        let output = Command::new("op").arg("read").arg(path).output().unwrap();
-        String::from_utf8(output.stdout).unwrap()
+    fn read(path: String) -> io::Result<String> {
+        let output = Command::new("op").arg("read").arg(path).output()?;
+        // we know this value must be utf8, so just use expect()
+        Ok(String::from_utf8(output.stdout).expect("invalid utf8"))
     }
 }
 
@@ -80,25 +79,18 @@ struct AnyConnect {
     user: String,
 }
 impl AnyConnect {
-    fn connect(&self, pass: String) {
-        let content = format!("{}\n{}\n{}", self.group, self.user, pass);
-
-        let mut process = match Command::new("/opt/cisco/anyconnect/bin/vpn")
+    fn connect(&self, pass: String) -> io::Result<String> {
+        let mut process = Command::new("/opt/cisco/anyconnect/bin/vpn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .args(["-s", "connect", &self.host])
-        .spawn() {
-            Err(e) => panic!("couldn’t spawn process {e}"),
-            Ok(process) => process
-        };
+        .spawn()?;
 
-        match process.stdin.take().unwrap().write_all(content.as_bytes()) {
-            Err(e) => panic!("couldn’t write to stdin: {e}"),
-            _ => ()
-        }
+        let content = format!("{}\n{}\n{}", self.group, self.user, pass);
+        let mut stdin = process.stdin.take().unwrap();
+        stdin.write_all(content.as_bytes())?;
 
-        let output = process.wait_with_output().expect("failed to read output");
-        let out = String::from_utf8(output.stdout);
-        println!("{:?}", out);
+        let output = process.wait_with_output()?;
+        Ok(String::from_utf8(output.stdout).expect("invalid utf8"))
     }
 }
